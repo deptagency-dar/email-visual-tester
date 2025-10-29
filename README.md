@@ -115,8 +115,8 @@ This framework is continuously being improved. Here are the key tasks planned an
 
 The immediate goal is to complete the integration with the **Litmus** platform.
 
-* **Task:** Implement the `LitmusService` class within a new file (e.g., `litmus-service.ts`), mirroring the structure of `email-on-acid-service.ts`. This requires implementing the logic to interact with the Litmus API for test creation and image retrieval.
-* **Goal:** Once implemented, users can change `EMAIL_SERVICE` to `"litmus"` in the `.env` file and use the `LITMUS_API_KEY` without code changes in the rest of the framework.
+**Task:** Implement the `LitmusService` class, mirroring the structure of `email-on-acid-service.ts`.
+* **Goal:** Once implemented, the framework will be configured to perform visual tests **directly on emails received by the Litmus service**, eliminating the need for **manual HTML file extraction** and local placement in the `./emails` folder. This streamlines the entire workflow.
 
 #### 2. Better Reporting Tool (Desirable)
 
