@@ -1,55 +1,75 @@
-// tests/blueprint.spec.ts
 import { test, expect } from '@playwright/test';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import type { GeneratedPreview } from '../src/global-setup';
+import { sanitizeFilename } from '../src/utils/filename';
 
+// TASK_NAME selects which generated preview JSON we read.
+// QA: Make sure TASK_NAME matches the HTML file used in setup.
 const taskId = process.env.TASK_NAME;
 
+// If no task name, skip entire suite (prevents confusing failures).
 if (!taskId) {
-  test.skip('No task name defined', () => {
-    console.error('Environment variable TASK_NAME must be set to run this test.');
+  test.skip('TASK_NAME not set', () => {
+    console.error('Please set TASK_NAME before running tests.');
   });
 } else {
-  const sanitizeFilename = (name: string): string => name.toLowerCase().replace(/[^a-z0-9\s-.]/g, '').replace(/\s+/g, '_').substring(0, 100);
-
-  const GENERATED_URLS_FILE = resolve(__dirname, '..', 'temp', `generated-preview-urls-${sanitizeFilename(taskId)}.json`);
+  // Hyphen-style consistent with setup.
+  const sanitizedTaskId = sanitizeFilename(taskId);
+  const GENERATED_URLS_FILE = resolve(
+    __dirname,
+    '..',
+    'temp',
+    `generated-preview-urls-${sanitizedTaskId}.json`
+  );
 
   let generatedPreviews: GeneratedPreview[] = [];
+
+  // Attempt to load preview URL list produced by global setup.
   if (existsSync(GENERATED_URLS_FILE)) {
     try {
-      const fileContent = readFileSync(GENERATED_URLS_FILE, 'utf-8');
-      generatedPreviews = JSON.parse(fileContent);
-      console.log(`[Test File] Loaded ${generatedPreviews.length} email preview URLs for task "${taskId}".`);
+      generatedPreviews = JSON.parse(readFileSync(GENERATED_URLS_FILE, 'utf-8'));
+      console.log(
+        `[Test] Loaded ${generatedPreviews.length} preview URL(s) for "${taskId}".`
+      );
     } catch (error: any) {
-      console.error(`[Test File] Error loading generated preview URLs from ${GENERATED_URLS_FILE}: ${error.message}`);
+      console.error(`[Test] Could not parse preview file: ${error.message}`);
     }
   } else {
-    console.error(`[Test File] Error: Generated URLs file not found at ${GENERATED_URLS_FILE}. Please ensure global-setup runs successfully.`);
+    console.error(`[Test] Preview file missing: ${GENERATED_URLS_FILE}`);
   }
 
-  // Create the tests dynamically from the loaded URLs
+  // If we have previews, generate one test per email client.
   if (generatedPreviews.length > 0) {
-    test.describe(`Email Preview Tests for Task: ${taskId}`, () => {
+    test.describe(`Visual Email Checks: ${taskId}`, () => {
       generatedPreviews.forEach(preview => {
-        test(`Tests Staging - ${preview.name} (${preview.client})`, async ({ page }) => {
-          const screenshotName = `${preview.client.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`;
-          
-          test.info().annotations.push({ type: 'client', description: preview.client });
-          test.info().annotations.push({ type: 'previewUrl', description: preview.url });
-          
-          await page.goto(preview.url, { waitUntil: 'networkidle' });
-          await expect(page).toHaveScreenshot(screenshotName, {
-            fullPage: true,
-            timeout: 10000,
-            maxDiffPixelRatio: 0.05,
-          });
+        test(`${preview.name} (${preview.client})`, async ({ page }) => {
+          // Screenshot filename (derived from client ID).
+          const screenshotName = `${preview.client
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')}.png`;
+
+            // Annotations appear in the HTML report (extra context for QA).
+            test.info().annotations.push({ type: 'client', description: preview.client });
+            test.info().annotations.push({ type: 'previewUrl', description: preview.url });
+
+            // Navigate to the remote screenshot page from the preview service.
+            await page.goto(preview.url, { waitUntil: 'networkidle' });
+
+            // Compare the full page screenshot to stored baseline.
+            // QA: If this fails, open the HTML report to see differences.
+            await expect(page).toHaveScreenshot(screenshotName, {
+              fullPage: true,
+              timeout: 10000,
+              maxDiffPixelRatio: 0.05,
+            });
         });
       });
     });
   } else {
-    test.describe(`No Email Previews for Task: ${taskId}`, () => {
-      test.skip('Skipping tests as no preview URLs were generated.', () => {});
+    // Graceful skip when no previews were generated.
+    test.describe(`No Previews Available: ${taskId}`, () => {
+      test.skip('No preview URLs found; global setup may have failed.', () => {});
     });
   }
 }

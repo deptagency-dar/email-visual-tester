@@ -1,77 +1,74 @@
-// playwright.config.ts
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig } from '@playwright/test';
 import { resolve } from 'path';
 import * as dotenv from 'dotenv';
 
-// Load environment variables from .env file (e.g., your EOA API keys, TASK_NAME, BUILD_NAME)
+// 1) Loads variables from .env (like TASK_NAME) so the test run adapts per task.
+//    QA: If a test isn't picking up your task, ensure .env has TASK_NAME or export it in the shell.
 dotenv.config();
 
-// Helper to sanitize filename to prevent path issues
+// 2) Turns a task name into a safe folder/file segment: lowercase, hyphens, limited length.
 function sanitizeFilename(name: string): string {
-    return name.toLowerCase().replace(/[^a-z0-9\s-.]/g, '').replace(/\s+/g, '-').substring(0, 100);
+  return name.toLowerCase().replace(/[^a-z0-9\s-.]/g, '').replace(/\s+/g, '-').substring(0, 100);
 }
 
- // Get the task name from the environment variable
-  const taskName = process.env.TASK_NAME;
-  const projectName = taskName ? sanitizeFilename(taskName) : 'staging';
+// 3) PROJECT NAME: Used for screenshot folder paths.
+//    QA: Set TASK_NAME before running and your screenshots will go into visual-baselines/<task-name>/
+const taskName = process.env.TASK_NAME;
+const projectName = taskName ? sanitizeFilename(taskName) : 'staging';
 
-/**
- * See https://playwright.dev/docs/test-configuration
- */
+// 4) This configuration tells Playwright:
+//    - what setup code to run first,
+//    - where tests live,
+//    - how screenshots and reports are stored,
+//    - retry behavior in CI.
 export default defineConfig({
-
-  // Path to your global setup file. This script will run once before all tests.
-  // It's responsible for interacting with the Email on Acid API to generate preview URLs.
+  // Runs once before ALL tests. Generates preview URLs from the email HTML.
   globalSetup: resolve(__dirname, 'src', 'global-setup.ts'),
 
-  // Directory where your test files are located.
-  testDir: './tests', 
+  // Location of test specs.
+  testDir: './tests',
 
-  /* Run tests in files in parallel */
+  // Allow multiple tests at the same time (faster locally).
   fullyParallel: true,
 
-  /* Fail the build on CI if you accidentally left test.only in the source code. */
+  // Prevent accidental .only left in code from passing in CI.
   forbidOnly: !!process.env.CI,
 
-  /* Retry on CI only */
-  // Retries tests twice on CI environments, no retries locally by default.
+  // If running on CI, retry failures twice. Locally: no retries.
   retries: process.env.CI ? 2 : 0,
 
-  /* Opt out of parallel tests on CI. */
-  // Runs tests sequentially on CI, in parallel locally (if `workers` not specified).
+  // In CI, run single-threaded for stability. Locally, auto-select workers.
   workers: process.env.CI ? 1 : undefined,
 
-  /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: 'html', // Generates an HTML report after test execution.
+  // Produce an HTML report after test run (openable in a browser).
+  reporter: 'html',
 
-  /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
+  // Shared settings for every test (e.g., capture traces on first retry).
   use: {
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry', // Captures trace for failed tests on retry, helpful for debugging.
+    trace: 'on-first-retry',
+    // NOTE: We purposely do NOT set screenshot thresholds here. They are managed per assertion.
   },
 
-  /* Configure projects for different environments/browsers */
+  // Define a single "project" (bucket of tests) named after the task.
+  // QA: Only the blueprint spec is executed here.
   projects: [
     {
-      // This is our main project for running email preview tests against the 'staging' context.
-      // The 'name' property 'staging' is used in the `pathTemplate` below for screenshot organization.
-      name: projectName, 
+      name: projectName,
       testMatch: 'tests/blueprint.spec.ts'
     },
   ],
 
-  /* Output directory for test results, traces, and generated screenshots/snapshots. */
+  // Raw artifacts (traces, videos if enabled, etc.).
   outputDir: 'test-results/',
 
-  /* Configure screenshot and snapshot path templates */
+  // How visual comparisons store baseline files.
+  // QA: Baseline images live under visual-baselines/<projectName>/.
   expect: {
-      toHaveScreenshot: {
-        // We will store the screenshots in a new folder named 'visual-baselines'.
-        pathTemplate: resolve(__dirname, 'visual-baselines', '{projectName}', '{arg}{ext}'),
-      },
-      toMatchAriaSnapshot: {
-        // Snapshots will also go into this new folder.
-        pathTemplate: resolve(__dirname, 'visual-baselines', '{projectName}', '{arg}{ext}'),
-      },
+    toHaveScreenshot: {
+      pathTemplate: resolve(__dirname, 'visual-baselines', '{projectName}', '{arg}{ext}'),
     },
+    toMatchAriaSnapshot: {
+      pathTemplate: resolve(__dirname, 'visual-baselines', '{projectName}', '{arg}{ext}'),
+    },
+  },
 });

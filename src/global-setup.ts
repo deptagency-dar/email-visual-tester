@@ -1,144 +1,141 @@
-// src/global-setup.ts
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 import * as dotenv from 'dotenv';
-import { IEmailPreviewService } from './interfaces/i-email-preview-service';
 import { getEmailPreviewService } from './utils/service-factory';
+import { sanitizeFilename } from './utils/filename';
 import axios from 'axios';
 
 dotenv.config();
 
+// Shape of each preview entry saved for tests.
+// QA: Each item represents one email client (e.g., Gmail, Outlook).
 export interface GeneratedPreview {
-  name: string;
-  url: string;
-  client: string;
+  name: string;  // Human-readable label
+  url: string;   // URL to the rendered email screenshot
+  client: string; // Raw client identifier from the API
 }
 
+// Folder paths used throughout.
 const TEMP_DIR = resolve(__dirname, '..', 'temp');
 const ARCHIVE_DIR = resolve(TEMP_DIR, 'archives');
 const EMAILS_DIR = resolve(__dirname, '..', 'emails');
 const DEFAULT_CLIENTS_FILE = resolve(__dirname, '..', 'default-clients-eoa.json');
 
-// Helper function to sanitize string for use in file names
-function sanitizeFilename(name: string, isKebabCase: boolean = true): string {
-  let sanitized = name.toLowerCase().replace(/[^a-z0-9\s-.]/g, '');
-  if (isKebabCase) {
-      sanitized = sanitized.replace(/\s+/g, '-');
-  } else {
-      sanitized = sanitized.replace(/\s+/g, '_');
-  }
-  return sanitized.substring(0, 100);
-}
-
+// MAIN ENTRY POINT: Runs once before tests.
+// Generates preview URLs from the email HTML you placed in /emails/<task>.html
 async function globalSetup() {
   const taskName = process.env.TASK_NAME;
-  
+
   if (!taskName) {
-    console.warn('\nWARNING: TASK_NAME is not set. Cannot determine which HTML file to use. Exiting setup.');
+    console.warn('WARNING: TASK_NAME is not set. No previews generated.');
     return;
   }
 
-  const emailHtmlFileName = `${sanitizeFilename(taskName)}.html`;
+  // Standard naming (hyphens) used for both HTML and results JSON.
+  const sanitizedTaskName = sanitizeFilename(taskName);
+  const emailHtmlFileName = `${sanitizedTaskName}.html`;
   const EMAIL_HTML_FILE = resolve(EMAILS_DIR, emailHtmlFileName);
-  const sanitizedTaskName = sanitizeFilename(taskName, false); // For JSON filename
   const GENERATED_URLS_FILE = resolve(TEMP_DIR, `generated-preview-urls-${sanitizedTaskName}.json`);
 
   const now = new Date();
-  const verboseTimestamp = [
-    now.getUTCFullYear(),
-    (now.getUTCMonth() + 1).toString().padStart(2, '0'),
-    now.getUTCDate().toString().padStart(2, '0'),
-    now.getUTCHours().toString().padStart(2, '0'),
-    now.getUTCMinutes().toString().padStart(2, '0'),
-    now.getUTCSeconds().toString().padStart(2, '0'),
-    now.getUTCMilliseconds().toString().padStart(3, '0')
-  ].join('-');
-  
-  let taskIdForLogs = `${taskName} - EOA-API-${now.toLocaleString('en-US', { timeZone: 'America/Argentina/Buenos_Aires', hour12: false })}`;
+  const verboseTimestamp = now.toISOString().replace(/[:.]/g, '-').split('T').join('-');
 
-  console.log(`\n--- Running Playwright Global Setup for Task: "${taskName}" ---`);
+  console.log(`--- Global Setup: Preparing previews for "${taskName}" ---`);
 
+  // QA: If this fails, ensure the HTML file exists in /emails.
   if (!existsSync(EMAIL_HTML_FILE)) {
-    throw new Error(`Error: Could not find email HTML file at ${EMAIL_HTML_FILE}.`);
-  }
-  
-  let desiredApiClients: string[] = [];
-  if (existsSync(DEFAULT_CLIENTS_FILE)) {
-    try {
-      const clientsConfigString = readFileSync(DEFAULT_CLIENTS_FILE, 'utf-8');
-      const clientsConfig = JSON.parse(clientsConfigString);
-      desiredApiClients = Object.values(clientsConfig).map((client: any) => client.id);
-    } catch (error: any) {
-      throw new Error(`[${taskIdForLogs}] Failed to load default email preview clients.`);
-    }
-  } else {
-    throw new Error(`Error: Could not find default clients file at ${DEFAULT_CLIENTS_FILE}.`);
+    throw new Error(`Missing email HTML file: ${EMAIL_HTML_FILE}`);
   }
 
-  const serviceToUse = process.env.EMAIL_PREVIEW_SERVICE?.toLowerCase();
-  const apiKey = process.env[`${serviceToUse?.toUpperCase()}_API_KEY`];
-  const accountPassword = process.env.EMAILONACID_ACCOUNT_PASSWORD; 
+  // Determine which email clients to request (read from JSON config).
+  const desiredApiClients = getDesiredApiClients();
 
-  if (!serviceToUse || !apiKey || !accountPassword) {
-    throw new Error('Environment variables EMAIL_PREVIEW_SERVICE, its API key, and EOA password must be set.');
-  }
+  // Pull credentials from environment variables.
+  const { serviceToUse, apiKey, accountPassword } = getServiceCredentials();
 
-  if (!existsSync(TEMP_DIR)) { mkdirSync(TEMP_DIR, { recursive: true }); }
-  if (!existsSync(ARCHIVE_DIR)) { mkdirSync(ARCHIVE_DIR, { recursive: true }); }
+  // Ensure output folders exist.
+  if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
+  if (!existsSync(ARCHIVE_DIR)) mkdirSync(ARCHIVE_DIR, { recursive: true });
 
+  // Read the email HTML file contents to send to the preview service.
   const emailHtmlContent = readFileSync(EMAIL_HTML_FILE, 'utf-8');
-  let previewService: IEmailPreviewService;
-  try {
-    previewService = getEmailPreviewService(serviceToUse, apiKey, accountPassword);
-  } catch (error: any) {
-    throw new Error(`[${taskIdForLogs}] Error initializing email preview service: ${error.message}`);
-  }
+
+  // Instantiate the chosen preview service (currently Email on Acid).
+  const previewService = getEmailPreviewService(serviceToUse, apiKey, accountPassword);
 
   try {
-    const emailSubject = `${taskName || 'Playwright Test'} - EOA Preview - ${now.toLocaleString('en-US', { timeZone: 'America/Argentina/Buenos_Aires', hour12: false })}`;
+    // Subject helps identify the test in the external service dashboard.
+    const emailSubject = `${taskName} - EOA Preview - ${now.toLocaleString()}`;
+
+    // 1) Upload HTML (create a test).
     const injectionResponse = await previewService.injectHtml(emailHtmlContent, emailSubject, { clients: desiredApiClients });
+
+    // 2) Poll until screenshot URLs are ready.
     const previewUrlsMap = await previewService.getPreviewUrls(injectionResponse, desiredApiClients);
 
+    // 3) Convert the raw map into a friendlier array for the test file.
     const generatedPreviews: GeneratedPreview[] = Object.entries(previewUrlsMap).map(([client, url]) => ({
       name: `${client.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase())} Preview`,
       url,
       client,
     }));
-    
+
+    // 4) Save main JSON file consumed by the test spec.
     writeFileSync(GENERATED_URLS_FILE, JSON.stringify(generatedPreviews, null, 2));
-    console.log(`[${taskIdForLogs}] Generated URLs saved to: ${GENERATED_URLS_FILE}`);
+    console.log(`Saved preview list: ${GENERATED_URLS_FILE}`);
 
-    if (taskName) {
-        // ➡️ NEW: Use the verbose timestamp for the archive filename
-        const archiveFileName = `generated-preview-urls-${sanitizedTaskName}-${verboseTimestamp}.json`;
-        const archiveFilePath = resolve(ARCHIVE_DIR, archiveFileName);
-        writeFileSync(archiveFilePath, JSON.stringify(generatedPreviews, null, 2));
-        console.log(`[${taskIdForLogs}] Archived URLs to: ${archiveFilePath}`);
-    } else {
-        console.warn(`[${taskIdForLogs}] Skipping archiving URLs: TASK_NAME environment variable not set.`);
-    }
-
-  } catch (error: any) {
-    console.error(`[${taskIdForLogs}] Critical error during email preview API process:`, error.message);
-    if (axios.isAxiosError(error) && error.response) {
-      console.error('API Response Data:', JSON.stringify(error.response.data, null, 2));
-    }
-    throw new Error(`[${taskIdForLogs}] Failed to generate preview URLs: ${error.message}`);
+    // 5) Archive (timestamped) copy for history / debugging.
+    archiveGeneratedUrls(sanitizedTaskName, verboseTimestamp, generatedPreviews);
+  } catch (error) {
+    // If anything goes wrong, show helpful info then fail early.
+    handleError(error);
   }
 
-  console.log('--- Playwright Global Setup Finished ---');
+  console.log('--- Global Setup Complete ---');
+}
+
+// Reads default client configuration (which email renderers to request).
+function getDesiredApiClients() {
+  if (!existsSync(DEFAULT_CLIENTS_FILE)) {
+    throw new Error(`Missing default clients config: ${DEFAULT_CLIENTS_FILE}`);
+  }
+
+  const clientsConfigString = readFileSync(DEFAULT_CLIENTS_FILE, 'utf-8');
+  const clientsConfig = JSON.parse(clientsConfigString);
+
+  // Returns an array of client IDs (e.g., ["gmail_webmail", "outlook_2021"])
+  return Object.values(clientsConfig).map((client: any) => client.id);
+}
+
+// Fetch credentials and validate presence.
+// QA: If this fails, check .env or environment exports.
+function getServiceCredentials() {
+  const serviceToUse = process.env.EMAIL_PREVIEW_SERVICE?.toLowerCase();
+  const apiKey = process.env[`${serviceToUse?.toUpperCase()}_API_KEY`];
+  const accountPassword = process.env.EMAILONACID_ACCOUNT_PASSWORD;
+
+  if (!serviceToUse || !apiKey || !accountPassword) {
+    throw new Error('Missing EMAIL_PREVIEW_SERVICE, API key, or EOA password.');
+  }
+
+  return { serviceToUse, apiKey, accountPassword };
+}
+
+// Saves an archive copy with a timestamp (for later comparison / audits).
+function archiveGeneratedUrls(sanitizedTaskName: string, verboseTimestamp: string, generatedPreviews: GeneratedPreview[]) {
+  const archiveFileName = `generated-preview-urls-${sanitizedTaskName}-${verboseTimestamp}.json`;
+  const archiveFilePath = resolve(ARCHIVE_DIR, archiveFileName);
+  writeFileSync(archiveFilePath, JSON.stringify(generatedPreviews, null, 2));
+  console.log(`Archived: ${archiveFilePath}`);
+}
+
+// Centralized error reporting with optional API response data when available.
+function handleError(error: any) {
+  console.error('Setup error:', error.message);
+  if (axios.isAxiosError(error) && error.response) {
+    console.error('API response body:', JSON.stringify(error.response.data, null, 2));
+  }
+  throw new Error(`Preview generation failed: ${error.message}`);
 }
 
 export default globalSetup;
-
-// --- TEMPORARY ADDITION FOR DIRECT TESTING ONLY ---
-// This block ensures globalSetup() is called when the script is run directly
-// via `ts-node src/global-setup.ts`.
-// Playwright handles calling globalSetup() automatically during `playwright test` runs.
-// if (require.main === module) {
-//   globalSetup().catch(error => {
-//     console.error("Error executing global setup directly:", error);
-//     process.exit(1);
-//   });
-// }
-// --- END TEMPORARY ADDITION ---´

@@ -70,20 +70,6 @@
     "category": "Web",
     "browser": "Firefox"
   },
-  "iphone13mini_15": {
-    "id": "iphone13mini_15",
-    "client": "iPhone 13 Mini",
-    "os": "iOS 15",
-    "category": "Mobile",
-    "default": true
-  },
-  "iphone13mini_15_dm": {
-    "id": "iphone13mini_15_dm",
-    "client": "iPhone 13 Mini",
-    "os": "iOS 15 (Dark Mode)",
-    "category": "Mobile",
-    "default": true
-  },
   "iphone16pro_18": {
     "id": "iphone16pro_18",
     "client": "iPhone 16 Pro",
@@ -200,13 +186,6 @@
     "id": "yahoocom-lm_chrcurrent_win10",
     "client": "Yahoo.com",
     "os": "Windows 10",
-    "category": "Web",
-    "browser": "Chrome"
-  },
-  "yahoocom-dm_chrcurrent_win10": {
-    "id": "yahoocom-dm_chrcurrent_win10",
-    "client": "Yahoo.com",
-    "os": "Windows 10 (Dark Mode)",
     "category": "Web",
     "browser": "Chrome"
   },

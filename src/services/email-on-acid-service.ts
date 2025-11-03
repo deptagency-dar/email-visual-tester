@@ -1,242 +1,348 @@
-// src/services/email-on-acid-service.ts
+// PURPOSE: Talks to the "Email on Acid" service to:
+// 1) Upload email HTML and start a preview test.
+// 2) Poll for screenshot URLs for specified clients.
+
 import axios from 'axios';
 import { IEmailPreviewService } from '../interfaces/i-email-preview-service';
 
-// Helper function for basic authentication header
-function getBasicAuthHeader(apiKey: string, accountPassword: string): string {
-  const credentials = Buffer.from(`${apiKey}:${accountPassword}`).toString('base64');
-  return `Basic ${credentials}`;
+// Builds the Basic Authorization header (API key + password).
+function createAuthHeader(apiKey: string, password: string): string {
+  return `Basic ${Buffer.from(`${apiKey}:${password}`).toString('base64')}`;
 }
 
 export class EmailOnAcidService implements IEmailPreviewService {
   private readonly apiKey: string;
-  private readonly accountPassword: string;
-  private readonly baseUrl: string;
+  private readonly password: string;
+  private readonly baseUrl = 'https://api.emailonacid.com';
 
-  constructor(apiKey: string, accountPassword: string) {
-    if (!apiKey || !accountPassword) {
-      throw new Error('EmailOnAcidService: API key and account password are required for Basic Authentication.');
+  constructor(apiKey: string, password: string) {
+    if (!apiKey || !password) {
+      throw new Error('EmailOnAcidService: API key and password are required.');
     }
     this.apiKey = apiKey;
-    this.accountPassword = accountPassword;
-    this.baseUrl = 'https://api.emailonacid.com';
+    this.password = password;
   }
 
-  /**
-   * Injects email HTML content and initiates the test.
-   * Returns the test_id from Email on Acid.
-   * @param htmlContent The HTML content of the email.
-   * @param subject Optional subject for the email preview.
-   * @param options Optional additional service-specific options.
-   * @returns A promise that resolves to an object containing the EOA `test_id`.
-   */
+  // STEP 1: Upload the email HTML and create a new test.
   async injectHtml(
     htmlContent: string,
     subject?: string,
     options?: Record<string, any>
   ): Promise<{ test_id: string }> {
     const headers = {
-      'Authorization': getBasicAuthHeader(this.apiKey, this.accountPassword),
+      Authorization: createAuthHeader(this.apiKey, this.password),
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     };
 
-    const clientsForTestCreation = options?.clients && Array.isArray(options.clients) 
-                                   ? options.clients 
-                                   : undefined; // Pass undefined to let EOA decide if no specific list is given
-
+    // The payload includes subject, raw HTML, and the list of clients if provided.
     const payload = {
       subject: subject || `Email Test - ${new Date().toLocaleString('en-US', { timeZone: 'America/Argentina/Buenos_Aires' })}`,
       html: htmlContent,
-      ...(clientsForTestCreation ? { clients: clientsForTestCreation } : {}),
-      // Any other options passed via `options` will be spread here.
-      // Make sure 'clients' isn't duplicated if it's already in `options`.
+      ...(options?.clients ? { clients: options.clients } : {}),
       ...options,
     };
 
     try {
-      const response = await axios.post(`${this.baseUrl}/v5/email/tests`, payload, {
-        headers,
-      });
-      if (!response.data || !response.data.id) {
-        throw new Error('Email on Acid API did not return a test ID.');
+      console.log('📤 Uploading email to Email on Acid...');
+      const response = await axios.post(`${this.baseUrl}/v5/email/tests`, payload, { headers });
+      
+      if (!response.data?.id) {
+        throw new Error('Email on Acid did not return a test ID.');
       }
-      console.log(`EmailOnAcidService: Test created with ID: ${response.data.id}`);
+      
+      console.log(`✅ Test created. ID: ${response.data.id}`);
       return { test_id: response.data.id };
     } catch (error: any) {
-      console.error('Error injecting HTML with Email on Acid:', error.message);
+      console.error('❌ Upload failed:', error.message);
       if (axios.isAxiosError(error) && error.response) {
-        console.error('Response data:', JSON.stringify(error.response.data, null, 2));
-        console.error('Response status:', error.response.status);
+        console.error(`   API status: ${error.response.status}`);
       }
-      throw new Error(`Failed to inject HTML with Email on Acid: ${error.message}`);
+      throw error;
     }
   }
 
-  /**
-   * Retrieves preview URLs for specified email clients by polling the API.
-   * @param injectionResponse The response object obtained from `injectHtml` (expected to contain test_id).
-   * @param emailClients A list of email client identifiers (e.g., 'applemail16_dm', 'm365_w11_dm_dt').
-   * @returns A promise that resolves to a dictionary where keys are client names and values are their preview URLs.
-   */
+  // STEP 2: Poll the API until screenshots are ready for requested clients.
   async getPreviewUrls(
     injectionResponse: { test_id: string },
     emailClients: string[]
   ): Promise<Record<string, string>> {
-    const { test_id } = injectionResponse;
-    if (!test_id) {
-      throw new Error('EmailOnAcidService: test_id is required to get preview URLs.');
-    }
-    if (!emailClients || emailClients.length === 0) {
-      console.warn('EmailOnAcidService: No specific emailClients provided for getPreviewUrls. Will return all completed URLs.');
-    }
+    const testId = injectionResponse.test_id;
+    if (!testId) throw new Error('Missing test ID');
 
-    const headers = {
-      'Authorization': getBasicAuthHeader(this.apiKey, this.accountPassword),
-      'Accept': 'application/json',
-    };
+    // Polling behavior can be tuned with environment variables.
+    const maxAttempts = Number(process.env.EOA_MAX_ATTEMPTS || 60);
+    const waitSeconds = Number(process.env.EOA_WAIT_SECONDS || 10);
+    const showDebug = process.env.EOA_DEBUG === 'true';
 
-    const extractedUrls: Record<string, string> = {};
-    const MAX_POLLING_ATTEMPTS = 60; // Max attempts (60 attempts * 10 seconds = 10 minutes max wait)
-    const POLLING_INTERVAL_MS = 10000; // Wait 10 seconds between each polling attempt
+    console.log(`\n⏳ Gathering ${emailClients.length} screenshot(s)...`);
+    console.log(`   Checking every ${waitSeconds}s (up to ${maxAttempts} times)\n`);
 
-    for (let attempt = 0; attempt < MAX_POLLING_ATTEMPTS; attempt++) {
-      let allTargetClientsProcessed = true; // Assume true, then set to false if any are pending/missing
+    const capturedUrls: Record<string, string> = {};
 
-      try {
-        console.log(`\n  --- Polling Attempt ${attempt + 1}/${MAX_POLLING_ATTEMPTS} for test ID: ${test_id} ---`);
-        const response = await axios.get(`${this.baseUrl}/v5/email/tests/${test_id}/results`, {
-          headers,
-          timeout: POLLING_INTERVAL_MS * 0.9 // Ensure timeout is less than interval
-        });
-        
-        const currentApiResults: Record<string, any> = response.data || {};
-
-        // Determine which clients we *actually* need to poll for (targetClients, or all if none specified)
-        const clientsToMonitor = emailClients && emailClients.length > 0 ? emailClients : Object.keys(currentApiResults);
-
-        // If no clients were returned yet, keep polling.
-        if (Object.keys(currentApiResults).length === 0 && clientsToMonitor.length > 0) {
-            allTargetClientsProcessed = false;
-            console.log(`    DEBUG: No client results found in this response yet. Continuing to poll.`);
-        }
-
-        // Iterate through the *desired* or *all available* clients to check their status
-        for (const targetClientId of clientsToMonitor) {
-          const clientResult = currentApiResults[targetClientId]; // Access client data directly by ID
-
-          if (!clientResult) {
-            // This target client is not yet in the results object, so we need to continue polling.
-            allTargetClientsProcessed = false; 
-            console.log(`    DEBUG: Target client "${targetClientId}" not found in current API results object. Continuing to poll.`);
-            continue; // Move to next target client
-          }
-
-          // Check the status of the found client result
-          if (clientResult.status === 'Complete') { 
-            // Client is complete. Extract and store ONLY the default screenshot URL.
-            if (clientResult.screenshots?.default && typeof clientResult.screenshots.default === 'string') {
-              if (extractedUrls[targetClientId] !== clientResult.screenshots.default) {
-                  extractedUrls[targetClientId] = clientResult.screenshots.default;
-                  console.log(`    SUCCESS: Stored/Updated URL for "${targetClientId}": ${extractedUrls[targetClientId]}`);
-              } else {
-                  console.log(`    INFO: URL for "${targetClientId}" already captured and is the same. No update needed.`);
-              }
-            } else {
-              // Client is complete, but the URL is missing or not a string. This is an unexpected state.
-              console.warn(`    WARNING: Client "${targetClientId}" is 'Complete', but default screenshot URL is missing or invalid. Value: ${clientResult.screenshots?.default}`);
-              // Since the URL isn't valid yet, we still consider this client as not fully processed for a URL.
-              allTargetClientsProcessed = false; 
-            }
-          } else if (clientResult.status === 'Failed' || clientResult.status === 'Bounced') { 
-            // Client failed or bounced. We consider it processed for the purpose of stopping polling for *this* client.
-            if (!extractedUrls[targetClientId]) { // Log failure only if we haven't already marked it as complete
-              console.warn(`    FAILED: Client "${targetClientId}" status: ${clientResult.status}. Error: ${clientResult.status_details?.bounce_message || clientResult.error_message || 'No specific error message provided.'}`);
-            }
-          } else { // Status is 'Processing', 'Pending', or something else not final.
-            // Client is still pending, so we need to continue polling overall.
-            allTargetClientsProcessed = false;
-            console.log(`    Client "${targetClientId}" is still "${clientResult.status}". Continuing to poll.`);
-          }
-        }
-
-        // After iterating, check if all *desired* clients have reached a final state.
-        const finalizedTargetClientsCount = clientsToMonitor.filter(id => {
-            const clientData = currentApiResults[id];
-            return clientData && (clientData.status === 'Complete' || clientData.status === 'Failed' || clientData.status === 'Bounced');
-        }).length;
-
-        if (finalizedTargetClientsCount === clientsToMonitor.length) {
-          console.log('\n  All desired client previews have reached a final status (Complete, Failed, or Bounced)! Exiting polling loop.');
-          break; // Exit polling loop as we have all necessary data or confirmed failures
-        } else {
-          const extractedCount = Object.keys(extractedUrls).length;
-          const remainingToProcess = clientsToMonitor.filter(id => {
-              const clientData = currentApiResults[id];
-              // Remaining if not in response OR status is not final
-              return !clientData || (clientData.status !== 'Complete' && clientData.status !== 'Failed' && clientData.status !== 'Bounced');
-          });
-          console.log(`  Overall Progress: ${extractedCount} URLs successfully extracted. ${remainingToProcess.length} clients still pending/not in final state: [${remainingToProcess.join(', ')}]`);
-        }
-
-      } catch (error: any) {
-        if (axios.isAxiosError(error) && error.response) {
-          if (error.response.status === 404) {
-            console.warn(`  Polling error: Test results for ${test_id} not yet available (404 Not Found). Retrying...`);
-            allTargetClientsProcessed = false; 
-          } else if (error.response.status === 401) {
-            console.error("  Polling error: Authentication failed. Please check API Key and Account Password.");
-            throw error; // Re-throw fatal auth error
-          } else {
-            console.warn(`  Polling error, status ${error.response.status}: ${error.message}. API Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
-            allTargetClientsProcessed = false; 
-          }
-        } else {
-          console.warn(`  Network or unexpected error during polling: ${error.message}. Retrying...`);
-          allTargetClientsProcessed = false; 
-        }
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const results = await this.fetchResults(testId, waitSeconds, showDebug);
+      
+      // If API call failed transiently, wait and retry.
+      if (!results) {
+        await this.wait(waitSeconds, attempt, maxAttempts);
+        continue;
       }
 
-      // Only wait if it's not the last attempt AND we are still waiting for results to finalize
-      if (attempt < MAX_POLLING_ATTEMPTS - 1 && !allTargetClientsProcessed) {
-        await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL_MS));
+      const clientsInResults = this.processClientResults(
+        results,
+        emailClients,
+        capturedUrls,
+        showDebug
+      );
+
+      // Decide if it's time to stop polling early.
+      const shouldExit = this.checkIfShouldExit(
+        emailClients,
+        results,
+        capturedUrls,
+        clientsInResults,
+        attempt,
+        showDebug
+      );
+
+      if (shouldExit) {
+        console.log('\n✅ Finished collecting available screenshots.');
+        break;
       }
+
+      this.showProgress(emailClients, results, capturedUrls, attempt, showDebug);
+      await this.wait(waitSeconds, attempt, maxAttempts);
     }
 
-    // Final log and return
-    if (Object.keys(extractedUrls).length === 0 && emailClients.length > 0) {
-      console.warn(`EmailOnAcidService: No completed preview URLs were retrieved for specified clients [${emailClients.join(', ')}] for test ID ${test_id} after ${MAX_POLLING_ATTEMPTS} attempts.`);
-    } else if (emailClients.length > 0 && Object.keys(extractedUrls).length < emailClients.length) {
-      const missingClients = emailClients.filter(id => !extractedUrls[id]);
-      console.warn(`EmailOnAcidService: Only ${Object.keys(extractedUrls).length} of ${emailClients.length} desired client previews completed and had URLs. Missing: [${missingClients.join(', ')}]`);
-    } else if (emailClients.length > 0) {
-        console.log(`EmailOnAcidService: Successfully retrieved URLs for all ${Object.keys(extractedUrls).length} specified clients.`);
-    } else {
-        console.log(`EmailOnAcidService: Retrieved URLs for ${Object.keys(extractedUrls).length} clients (no specific clients requested).`);
-    }
-    
-    return extractedUrls;
+    // Return only successful screenshot URLs.
+    return this.buildFinalResults(emailClients, capturedUrls);
   }
 
-  async getSupportedClients(): Promise<string[]> {
-    const headers = {
-      'Authorization': getBasicAuthHeader(this.apiKey, this.accountPassword),
-      'Accept': 'application/json',
-    };
+  // INTERNAL: Fetch current status of the test from the API.
+  private async fetchResults(
+    testId: string,
+    timeoutSeconds: number,
+    showDebug: boolean
+  ): Promise<Record<string, any> | null> {
+    if (showDebug) {
+      console.log(`\n  📊 Polling test (ID: ${testId})`);
+    }
 
     try {
-      const response = await axios.get(`${this.baseUrl}/v5/email/clients`, { headers });
-      const clients = response.data;
-      if (clients && typeof clients === 'object') {
-        return Object.keys(clients);
-      }
-      return [];
+      const headers = {
+        Authorization: createAuthHeader(this.apiKey, this.password),
+        Accept: 'application/json',
+      };
+
+      const response = await axios.get(
+        `${this.baseUrl}/v5/email/tests/${testId}/results`,
+        { headers, timeout: timeoutSeconds * 1000 * 0.9 }
+      );
+
+      return response.data || {};
     } catch (error: any) {
-      console.error('Error fetching supported clients from Email on Acid:', error.message);
-      if (axios.isAxiosError(error) && error.response) {
-        console.error('Response data:', JSON.stringify(error.response.data, null, 2));
-        console.error('Response status:', error.response.status);
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 401) {
+          throw new Error('Authentication failed - check your API credentials');
+        }
+        if (showDebug && status !== 404) {
+          console.log(`   ⚠️ API error ${status}, will retry...`);
+        }
       }
+      return null;
+    }
+  }
+
+  // INTERNAL: Examine each client’s status and store URLs if ready.
+  private processClientResults(
+    results: Record<string, any>,
+    requestedClients: string[],
+    capturedUrls: Record<string, string>,
+    showDebug: boolean
+  ): string[] {
+    const clientsToCheck = requestedClients.length > 0 ? requestedClients : Object.keys(results);
+    const clientsFound: string[] = [];
+
+    for (const clientId of clientsToCheck) {
+      const client = results[clientId];
+
+      if (!client) {
+        if (showDebug) console.log(`   ⏳ ${clientId} - not ready yet`);
+        continue;
+      }
+
+      clientsFound.push(clientId);
+      const status = client.status;
+
+      if (status === 'Complete') {
+        this.handleCompleteClient(clientId, client, capturedUrls, showDebug);
+      } else if (status === 'Failed' || status === 'Bounced') {
+        this.handleFailedClient(clientId, status, capturedUrls);
+      } else if (showDebug) {
+        console.log(`   ⏳ ${clientId} - ${status}`);
+      }
+    }
+
+    return clientsFound;
+  }
+
+  // INTERNAL: When a client finishes successfully, capture its screenshot URL.
+  private handleCompleteClient(
+    clientId: string,
+    client: any,
+    capturedUrls: Record<string, string>,
+    showDebug: boolean
+  ): void {
+    const screenshotUrl = client.screenshots?.default;
+
+    if (screenshotUrl && typeof screenshotUrl === 'string') {
+      if (!capturedUrls[clientId]) {
+        capturedUrls[clientId] = screenshotUrl;
+        console.log(`   ✅ ${clientId}`);
+      }
+    } else if (showDebug) {
+      console.log(`   ⚠️ ${clientId} - Complete but screenshot not ready`);
+    }
+  }
+
+  // INTERNAL: Mark failed or bounced clients (so we don’t wait forever).
+  private handleFailedClient(
+    clientId: string,
+    status: string,
+    capturedUrls: Record<string, string>
+  ): void {
+    if (!capturedUrls[clientId]) {
+      console.log(`   ❌ ${clientId} - ${status}`);
+      capturedUrls[clientId] = ''; // Empty signals a failure
+    }
+  }
+
+  // INTERNAL: Decide if polling loop should stop.
+  private checkIfShouldExit(
+    requestedClients: string[],
+    results: Record<string, any>,
+    capturedUrls: Record<string, string>,
+    clientsInResults: string[],
+    attempt: number,
+    showDebug: boolean
+  ): boolean {
+    if (Object.keys(results).length === 0) return false;
+
+    const clientsToCheck = requestedClients.length > 0 ? requestedClients : Object.keys(results);
+    const appearedClients = clientsToCheck.filter(id => results[id]);
+
+    const finishedClients = appearedClients.filter(id => {
+      const status = results[id]?.status;
+      return status === 'Complete' || status === 'Failed' || status === 'Bounced';
+    });
+
+    const allFinished = finishedClients.length === appearedClients.length;
+    const allRequestedAppeared = appearedClients.length === clientsToCheck.length;
+    const waitedLongEnough = attempt >= 10;
+
+    if (!allFinished) return false;
+    if (!allRequestedAppeared && !waitedLongEnough) return false;
+
+    const completeClients = appearedClients.filter(id => results[id].status === 'Complete');
+    const completeWithUrls = completeClients.filter(id => capturedUrls[id] && capturedUrls[id] !== '');
+    const allCompleteHaveUrls = completeWithUrls.length === completeClients.length;
+    const triedEnoughForScreenshots = attempt >= 15;
+
+    if (allCompleteHaveUrls || triedEnoughForScreenshots) return true;
+
+    if (showDebug) {
+      const waiting = completeClients.length - completeWithUrls.length;
+      console.log(`   Waiting for ${waiting} screenshot URL(s)...`);
+    }
+
+    return false;
+  }
+
+  // INTERNAL: Periodic progress summary.
+  private showProgress(
+    requestedClients: string[],
+    results: Record<string, any>,
+    capturedUrls: Record<string, string>,
+    attempt: number,
+    showDebug: boolean
+  ): void {
+    if (attempt % 5 !== 0 && !showDebug) return;
+
+    const successCount = Object.keys(capturedUrls).filter(id => capturedUrls[id] !== '').length;
+    console.log(`   Progress: ${successCount}/${requestedClients.length} captured`);
+
+    if (!showDebug) return;
+
+    const pending = requestedClients.filter(id => {
+      const client = results[id];
+      return !client || (client.status !== 'Complete' && client.status !== 'Failed' && client.status !== 'Bounced');
+    });
+
+    const completeNoUrl = requestedClients.filter(id => {
+      const client = results[id];
+      return client?.status === 'Complete' && !capturedUrls[id];
+    });
+
+    if (pending.length > 0) {
+      console.log(`   Pending: ${pending.join(', ')}`);
+    }
+    if (completeNoUrl.length > 0) {
+      console.log(`   Complete but URL missing: ${completeNoUrl.join(', ')}`);
+    }
+  }
+
+  // INTERNAL: Wait between attempts (basic delay).
+  private async wait(seconds: number, currentAttempt: number, maxAttempts: number): Promise<void> {
+    if (currentAttempt < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+    }
+  }
+
+  // INTERNAL: Build final result set (exclude failures).
+  private buildFinalResults(
+    requestedClients: string[],
+    capturedUrls: Record<string, string>
+  ): Record<string, string> {
+    const successfulUrls: Record<string, string> = {};
+    for (const [id, url] of Object.entries(capturedUrls)) {
+      if (url && url !== '') {
+        successfulUrls[id] = url;
+      }
+    }
+
+    const successCount = Object.keys(successfulUrls).length;
+    const failedCount = Object.values(capturedUrls).filter(url => url === '').length;
+    const neverAppeared = requestedClients.filter(id => !(id in capturedUrls));
+
+    if (successCount === requestedClients.length) {
+      console.log(`\n✅ All ${successCount} screenshot(s) ready.\n`);
+    } else {
+      console.warn(`\n⚠️ Captured ${successCount}/${requestedClients.length}.`);
+      if (failedCount > 0) {
+        const failed = Object.entries(capturedUrls).filter(([, url]) => url === '').map(([id]) => id);
+        console.warn(`   Failed/Bounced: ${failed.join(', ')}`);
+      }
+      if (neverAppeared.length > 0) {
+        console.warn(`   Never appeared (possibly unsupported): ${neverAppeared.join(', ')}\n`);
+      }
+    }
+
+    return successfulUrls;
+  }
+
+  // SECONDARY: Get full list of supported clients (not used in main flow).
+  async getSupportedClients(): Promise<string[]> {
+    try {
+      const headers = {
+        Authorization: createAuthHeader(this.apiKey, this.password),
+        Accept: 'application/json',
+      };
+      const response = await axios.get(`${this.baseUrl}/v5/email/clients`, { headers });
+      return Object.keys(response.data || {});
+    } catch (error: any) {
+      console.error('Unable to fetch supported clients:', error.message);
       return [];
     }
   }
