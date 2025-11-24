@@ -50,20 +50,18 @@ You must configure the `.env` file and the email's HTML file before every test r
     * Find the configuration file (i.e., `.env` in the root folder).
     * **Email Agent Credentials:** Define the service and provide the required credentials.
         ```
-        # Email Service Configuration
-        EMAIL_SERVICE="emailonacid" # Options: emailonacid or litmus (future)
-        
-        # Current Service Credentials
-        EMAILONACID_API_KEY="YOUR_EMAIL_ON_ACID_API_KEY"
-        EMAILONACID_ACCOUNT_PASSWORD="YOUR_EMAIL_ON_ACID_ACCOUNT_PASSWORD"
-        
-        # Future Litmus Credentials (For when LitmusService is implemented)
-        LITMUS_API_KEY="YOUR_LITMUS_API_KEY"
+      EMAIL_PREVIEW_SERVICE= # Options: 'emailonacid', 'litmus'
+
+      EMAILONACID_API_KEY= # Your Email on Acid API Key
+      EMAILONACID_ACCOUNT_PASSWORD= # Your Email on Acid Account Password
+      EXISTING_EOA_TEST_ID= # Your Existing Email on Acid Test ID
+
+      LITMUS_API_KEY= # Your Litmus API Key
+      EXISTING_LITMUS_EMAIL_GUID= # Your Existing Litmus Email GUID
         ```
     * **Define the Task:** Set the **eBay Task Name** that corresponds to the email you are testing. The framework uses this to find the correct blueprint.
         ```
-        # eBay Project Configuration
-        EBAY_TASK_NAME="EB-21397 Staging"
+        TASK_NAME= # Your Task Name e.g., "EB-22872 Staging"
         ```
 
 2.  **Place and Name the HTML File:**
